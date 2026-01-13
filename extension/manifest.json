@@ -7,6 +7,11 @@
   "host_permissions": [
     "https://www.youtube.com/*",
     "https://m.youtube.com/*",
+    "https://youtu.be/*",
+    "https://www.bilibili.com/*",
+    "https://m.bilibili.com/*",
+    "https://b23.tv/*",
+    "https://api.bilibili.com/*",
     "https://www.youtubegist.com/*"
   ],
   "action": {
@@ -15,8 +20,14 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://www.youtube.com/*"],
-      "js": ["content.js"],
+      "matches": ["https://www.youtube.com/*", "https://m.youtube.com/*", "https://youtu.be/*", "https://www.bilibili.com/*", "https://m.bilibili.com/*", "https://b23.tv/*"],
+      "js": [
+        "platform-adapter.js",
+        "adapters/youtube-adapter.js",
+        "adapters/bilibili-adapter.js",
+        "platform-manager.js",
+        "content.js"
+      ],
       "css": ["content.css"],
       "run_at": "document_idle"
     }

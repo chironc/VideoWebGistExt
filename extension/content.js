@@ -1,8 +1,8 @@
 const LOCAL_DEBUG_STORAGE_KEY = "youtubegist_local_debug";
 const REMOTE_BASE_URL = "https://host.996007.fun:4173/watch?v=";
-const LOCAL_BASE_URL = "https://localhost:5173/watch?v=";
+const LOCAL_BASE_URL = "http://localhost:5173/watch?v=";
 
-let GIST_BASE_URL = REMOTE_BASE_URL; // 默认使用远程服务器
+let GIST_BASE_URL = LOCAL_BASE_URL; // 默认使用远程服务器
 const PANEL_ID = "ygist-panel";
 const PANEL_HIDDEN_CLASS = "ygist-hidden";
 const PANEL_COLLAPSED_CLASS = "ygist-collapsed";
@@ -23,27 +23,58 @@ let embedStatusTimer;
 let resizeObserver;
 let isExpanded = true;
 
+// 初始化平台管理器
+let platformManager;
+let currentAdapter = null;
+
+function initPlatformManager() {
+  if (!platformManager) {
+    platformManager = new PlatformManager();
+    // 注册适配器
+    platformManager.registerAdapter(new YouTubeAdapter());
+    platformManager.registerAdapter(new BilibiliAdapter());
+  }
+  // 获取当前URL的适配器
+  currentAdapter = platformManager.getAdapter(window.location.href);
+  return currentAdapter;
+}
+
 (function init() {
   if (typeof document === "undefined") {
     return;
   }
 
   const bootstrap = () => {
+    // 初始化平台管理器
+    initPlatformManager();
+    
     ensurePanel();
     attachPanel();
     handleLocationChange();
 
-    // YouTube 是单页应用，下列事件帮助我们在导航时更新侧栏内容。
-    window.addEventListener("yt-navigate-finish", handleLocationChange);
-    window.addEventListener("popstate", handleLocationChange);
-    document.addEventListener("yt-page-data-updated", handleLocationChange);
+    // 根据当前适配器注册导航事件
+    if (currentAdapter) {
+      const navEvents = currentAdapter.getNavigationEvents();
+      navEvents.forEach(({ target, event }) => {
+        const targetObj = target === 'window' ? window : document;
+        targetObj.addEventListener(event, handleLocationChange);
+      });
+    }
 
     // 兜底轮询，避免极端情况下事件未触发。
     locationCheckTimer = window.setInterval(() => {
       attachPanel();
-      const resolvedId = extractYouTubeVideoId(window.location.href);
-      if (resolvedId !== currentVideoId) {
-        handleLocationChange();
+      // 确保平台管理器已初始化
+      if (!platformManager) {
+        initPlatformManager();
+      }
+      // 重新获取适配器（URL可能已改变）
+      const adapter = platformManager.getAdapter(window.location.href);
+      if (adapter) {
+        const resolvedId = adapter.extractVideoId(window.location.href);
+        if (resolvedId !== currentVideoId) {
+          handleLocationChange();
+        }
       }
     }, 800);
 
@@ -75,7 +106,7 @@ let isExpanded = true;
     // 读取面板状态和local debug设置
     chrome.storage.local.get({ 
       [PANEL_STATE_STORAGE_KEY]: isExpanded,
-      [LOCAL_DEBUG_STORAGE_KEY]: false 
+      [LOCAL_DEBUG_STORAGE_KEY]: true 
     }, (result) => {
       if (!chrome.runtime || !chrome.runtime.lastError) {
         const stored = result ? result[PANEL_STATE_STORAGE_KEY] : undefined;
@@ -84,7 +115,7 @@ let isExpanded = true;
         }
         
         // 更新GIST_BASE_URL
-        const isLocalDebug = result[LOCAL_DEBUG_STORAGE_KEY] || false;
+        const isLocalDebug = result[LOCAL_DEBUG_STORAGE_KEY] !== undefined ? result[LOCAL_DEBUG_STORAGE_KEY] : true;
         GIST_BASE_URL = isLocalDebug ? LOCAL_BASE_URL : REMOTE_BASE_URL;
       } else {
         console.warn("YouTubeGist: 读取设置失败", chrome.runtime.lastError);
@@ -132,6 +163,7 @@ function ensurePanel() {
   toggleBtnEl = document.createElement("button");
   toggleBtnEl.id = "ygist-toggle";
   toggleBtnEl.type = "button";
+  // 按钮文本将在 showPanel 中根据当前平台更新
   toggleBtnEl.textContent = "YouTubeGist";
   toggleBtnEl.disabled = true;
   toggleBtnEl.setAttribute("aria-expanded", isExpanded ? "true" : "false");
@@ -172,6 +204,14 @@ function ensurePanel() {
 }
 
 function handleLocationChange() {
+  // 确保平台管理器已初始化
+  if (!platformManager) {
+    initPlatformManager();
+  }
+  
+  // 重新获取适配器（URL可能已改变）
+  currentAdapter = platformManager.getAdapter(window.location.href);
+  
   ensurePanel();
   attachPanel();
 
@@ -179,7 +219,14 @@ function handleLocationChange() {
     return;
   }
 
-  const videoId = extractYouTubeVideoId(window.location.href);
+  // 如果没有匹配的适配器，隐藏面板
+  if (!currentAdapter) {
+    currentVideoId = null;
+    hidePanel();
+    return;
+  }
+
+  const videoId = currentAdapter.extractVideoId(window.location.href);
 
   if (!videoId) {
     currentVideoId = null;
@@ -207,6 +254,14 @@ function handleLocationChange() {
 function showPanel() {
   panelEl.classList.remove(PANEL_HIDDEN_CLASS);
   toggleBtnEl.disabled = false;
+
+  // 更新按钮文本以显示当前平台
+  if (currentAdapter) {
+    const platformName = currentAdapter.getPlatformName();
+    toggleBtnEl.textContent = `${platformName}Gist`;
+  } else {
+    toggleBtnEl.textContent = "YouTubeGist";
+  }
 
   if (isExpanded) {
     panelEl.classList.add(PANEL_EXPANDED_CLASS);
@@ -257,18 +312,21 @@ function attachPanel() {
     mountCheckTimer = undefined;
   }
 
-  if (panelEl.parentElement !== host) {
-    host.insertBefore(panelEl, host.firstChild);
+  // 如果 panelEl 已经在正确的 host 中，且是第一个子元素，则无需操作
+  if (panelEl.parentElement === host && panelEl === host.firstChild) {
+    return;
   }
+
+  // 需要移动 panelEl 到 host 的最前面
+  host.insertBefore(panelEl, host.firstChild);
 }
 
 function findPanelHost() {
-  const selectors = [
-    "#secondary-inner",
-    "#secondary",
-    "ytd-watch-flexy #secondary-inner",
-    "ytd-watch-flexy #secondary"
-  ];
+  if (!currentAdapter) {
+    return document.body || null;
+  }
+
+  const selectors = currentAdapter.getPanelHostSelectors();
 
   for (const selector of selectors) {
     const candidate = document.querySelector(selector);
@@ -280,40 +338,15 @@ function findPanelHost() {
   return document.body || null;
 }
 
-function extractYouTubeVideoId(rawUrl) {
-  try {
-    const url = new URL(rawUrl);
-    const host = url.hostname.replace(/^www\./, "");
+// extractYouTubeVideoId 函数已被适配器的 extractVideoId 方法替代
 
-    if (host === "youtube.com" || host === "m.youtube.com") {
-      return url.searchParams.get("v");
-    }
-
-    if (host === "youtu.be") {
-      return url.pathname.slice(1) || null;
-    }
-
-    if (host === "youtube-nocookie.com") {
-      const embedMatch = url.pathname.match(/\/embed\/([\w-]{11})/);
-      return embedMatch ? embedMatch[1] : null;
-    }
-  } catch (error) {
-    console.warn("YouTubeGist: 无法解析当前链接", error);
+function getPlayerHeight() {
+  if (!currentAdapter) {
+    return 480;
   }
 
-  return null;
-}
-
-function getYouTubePlayerHeight() {
-  // 尝试多种选择器来找到YouTube视频播放器
-  const selectors = [
-    '#movie_player',
-    '#player',
-    'ytd-player #movie_player',
-    'ytd-player #player',
-    '.html5-video-player',
-    'video'
-  ];
+  // 使用适配器提供的播放器选择器
+  const selectors = currentAdapter.getPlayerSelectors();
 
   for (const selector of selectors) {
     const element = document.querySelector(selector);
@@ -331,7 +364,7 @@ function updateIframeHeight() {
     return;
   }
 
-  const playerHeight = getYouTubePlayerHeight() - 50; // 减去50像素偏移
+  const playerHeight = getPlayerHeight() - 50; // 减去50像素偏移
   const frameShell = document.getElementById('ygist-frame-shell');
   
   if (frameShell) {
@@ -344,13 +377,12 @@ function setupResizeObserver() {
     resizeObserver.disconnect();
   }
 
-  // 观察YouTube播放器区域的变化
-  const playerSelectors = [
-    '#movie_player',
-    '#player',
-    'ytd-player',
-    '#primary'
-  ];
+  if (!currentAdapter) {
+    return;
+  }
+
+  // 使用适配器提供的播放器选择器
+  const playerSelectors = currentAdapter.getPlayerSelectors();
 
   for (const selector of playerSelectors) {
     const element = document.querySelector(selector);
@@ -399,26 +431,33 @@ function collapsePanel() {
   setStatus("");
 }
 
-function loadCurrentVideo() {
-  if (!currentVideoId) {
-    setStatus("请在 YouTube 视频页面中使用 YouTubeGist 面板。");
+async function loadCurrentVideo() {
+  if (!currentVideoId || !currentAdapter) {
+    const platformName = currentAdapter ? currentAdapter.getPlatformName() : "视频平台";
+    setStatus(`请在 ${platformName} 视频页面中使用 YouTubeGist 面板。`);
     return;
   }
 
-  const gistUrl = `${GIST_BASE_URL}${currentVideoId}`;
-  iframeEl.dataset.loaded = "false";
-  setStatus("正在加载对应的 YouTubeGist 页面...");
-  iframeEl.src = gistUrl;
+  try {
+    // 使用适配器构建Gist URL（异步方法）
+    const gistUrl = await currentAdapter.buildGistUrl(currentVideoId, GIST_BASE_URL);
+    iframeEl.dataset.loaded = "false";
+    setStatus("正在加载对应的 YouTubeGist 页面...");
+    iframeEl.src = gistUrl;
 
-  if (embedStatusTimer) {
-    window.clearTimeout(embedStatusTimer);
-  }
-
-  embedStatusTimer = window.setTimeout(() => {
-    if (iframeEl.dataset.loaded !== "true") {
-      setStatus("如果页面无法正常显示，请点击上方链接在新标签页打开。");
+    if (embedStatusTimer) {
+      window.clearTimeout(embedStatusTimer);
     }
-  }, 3500);
+
+    embedStatusTimer = window.setTimeout(() => {
+      if (iframeEl.dataset.loaded !== "true") {
+        setStatus("如果页面无法正常显示，请点击上方链接在新标签页打开。");
+      }
+    }, 3500);
+  } catch (error) {
+    console.error("YouTubeGist: 加载视频失败", error);
+    setStatus("加载失败，请稍后重试。");
+  }
 }
 
 function clearEmbed() {
