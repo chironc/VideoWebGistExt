@@ -36,13 +36,19 @@ async function handleLocalDebugChange() {
     
     // 通知content script更新URL
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (tab && tab.url && tab.url.includes("youtube.com")) {
-      chrome.tabs.sendMessage(tab.id, { 
-        type: "UPDATE_BASE_URL", 
-        isLocalDebug: isLocalDebug 
-      }).catch(() => {
-        // content script可能还没加载，忽略错误
-      });
+    if (tab && tab.url) {
+      // 检查是否在支持的平台上（YouTube或Bilibili）
+      const supportedPlatforms = ["youtube.com", "youtu.be", "bilibili.com", "b23.tv"];
+      const isSupportedPlatform = supportedPlatforms.some(platform => tab.url.includes(platform));
+      
+      if (isSupportedPlatform) {
+        chrome.tabs.sendMessage(tab.id, { 
+          type: "UPDATE_BASE_URL", 
+          isLocalDebug: isLocalDebug 
+        }).catch(() => {
+          // content script可能还没加载，忽略错误
+        });
+      }
     }
   } catch (error) {
     console.error("保存设置失败:", error);
