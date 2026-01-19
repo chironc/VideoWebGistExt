@@ -6,8 +6,12 @@ class BilibiliAdapter extends VideoPlatformAdapter {
    * 提取B站视频ID
    * 支持格式：
    * - https://www.bilibili.com/video/BVxxxxx
+   * - https://www.bilibili.com/video/BVxxxxx?p=XX (带分P参数)
    * - https://www.bilibili.com/video/avxxxxx
+   * - https://www.bilibili.com/video/avxxxxx?p=XX (带分P参数)
    * - https://b23.tv/xxxxx (短链接，需要解析)
+   * 
+   * 如果URL中包含p参数，会追加到videoid后面，格式为：BVXXXXXXXXXXPXX
    */
   extractVideoId(url) {
     try {
@@ -19,7 +23,16 @@ class BilibiliAdapter extends VideoPlatformAdapter {
         // 匹配 /video/BVxxxxx 或 /video/avxxxxx
         const videoMatch = urlObj.pathname.match(/\/(?:video\/)?(BV[a-zA-Z0-9]+|av\d+)/i);
         if (videoMatch) {
-          return videoMatch[1]; // 返回 BV号 或 av号
+          let videoId = videoMatch[1]; // BV号 或 av号
+          
+          // 从URL查询参数中提取P参数
+          const pParam = urlObj.searchParams.get('p');
+          if (pParam) {
+            // 将P参数追加到videoid后面，格式为：BVXXXXXXXXXXPXX
+            videoId += `P${pParam}`;
+          }
+          
+          return videoId;
         }
       }
 
@@ -32,6 +45,11 @@ class BilibiliAdapter extends VideoPlatformAdapter {
           // 尝试从路径中提取可能的ID
           // 注意：b23.tv的短链接无法直接提取BV/AV号，需要解析
           // 这里先返回路径，实际使用时可能需要额外处理
+          // 如果URL中有p参数，也尝试追加
+          const pParam = urlObj.searchParams.get('p');
+          if (pParam) {
+            return `${path}P${pParam}`;
+          }
           return path;
         }
       }
@@ -252,15 +270,7 @@ class BilibiliAdapter extends VideoPlatformAdapter {
       // 优先插入到弹幕框容器的最前面
       "#danmukuBox",                   // 弹幕框容器（ID选择器）
       ".danmaku-box",                   // 弹幕框容器（类选择器）
-      // 其次查找右侧推荐列表的父容器
-      ".recommend-list-container",     // 推荐列表容器
-      ".video-recommend-container",    // 视频推荐容器
-      ".right-recommend",              // 右侧推荐
-      ".right-container",              // 右侧容器
-      "#app .right-container",         // 带app容器的右侧容器
-      ".bili-layout-right",            // B站布局右侧
-      ".layout-right",                 // 布局右侧
-      "#app .layout-right"             // 带app容器的布局右侧
+  
       // 完全排除 .v-wrap 和 .video-info-right，因为它们包含UP主信息
     ];
   }
@@ -315,215 +325,119 @@ class BilibiliAdapter extends VideoPlatformAdapter {
   }
 
   /**
+   * 从URL中获取分P号（p参数）
+   * @returns {number|null} 分P号，如果URL中没有p参数则返回null
+   */
+  getPageFromUrl() {
+    try {
+      const urlParams = new URLSearchParams(window.location.search);
+      const pParam = urlParams.get('p');
+      return pParam ? parseInt(pParam, 10) : null;
+    } catch (error) {
+      console.warn("YouTubeGist: 无法从URL获取p参数", error);
+      return null;
+    }
+  }
+
+  /**
    * 从B站页面获取aid和cid
+   * 通过API获取视频信息，确保根据URL中的p参数获取正确的分P对应的cid
+   * 不同的p参数对应不同的cid，必须根据URL中的p参数选择正确的分P
    * @returns {Promise<{aid: number, cid: number}|null>}
    */
   async getAidAndCid() {
     try {
+      // 首先从URL获取p参数（分P号）
+      const targetPage = this.getPageFromUrl();
+      
       console.log("YouTubeGist: getAidAndCid - 开始获取", {
-        hasInitialState: typeof window.__INITIAL_STATE__ !== 'undefined',
-        hasPlayinfo: typeof window.__playinfo__ !== 'undefined',
-        location: window.location.href
+        location: window.location.href,
+        targetPage: targetPage
       });
 
-      // 等待页面数据加载（最多等待3秒）
-      let retries = 0;
-      const maxRetries = 30; // 30次 * 100ms = 3秒
-      
-      while (retries < maxRetries) {
-        // 方法1: 从window.__INITIAL_STATE__获取（最可靠的方法）
-        if (window.__INITIAL_STATE__) {
-          const state = window.__INITIAL_STATE__;
-          console.log("YouTubeGist: getAidAndCid - __INITIAL_STATE__存在", {
-            hasVideoData: !!state.videoData,
-            hasAid: !!state.videoData?.aid,
-            pagesCount: state.videoData?.pages?.length || 0
-          });
-          
-          if (state.videoData && state.videoData.aid) {
-            // 获取当前分P的cid
-            const pages = state.videoData.pages || [];
-            // 尝试从URL获取当前分P号
-            const urlParams = new URLSearchParams(window.location.search);
-            const pParam = urlParams.get('p');
-            const currentPage = pParam ? parseInt(pParam, 10) : (state.videoData.p || state.videoData.page || 1);
-            const pageInfo = pages[currentPage - 1] || pages[0];
-            
-            console.log("YouTubeGist: getAidAndCid - 分P信息", {
-              currentPage: currentPage,
-              pagesCount: pages.length,
-              hasPageInfo: !!pageInfo,
-              hasCid: !!pageInfo?.cid
-            });
-            
-            if (pageInfo && pageInfo.cid) {
-              console.log("YouTubeGist: 从__INITIAL_STATE__获取aid和cid", {
-                aid: state.videoData.aid,
-                cid: pageInfo.cid,
-                page: currentPage
-              });
-              return {
-                aid: state.videoData.aid,
-                cid: pageInfo.cid
-              };
-            }
-          }
-        }
-
-        // 方法2: 从window.__playinfo__获取
-        if (window.__playinfo__) {
-          const playinfo = window.__playinfo__;
-          console.log("YouTubeGist: getAidAndCid - __playinfo__存在", {
-            hasData: !!playinfo.data,
-            hasAid: !!playinfo.data?.aid,
-            hasCid: !!playinfo.data?.cid
-          });
-          
-          if (playinfo.data && playinfo.data.aid && playinfo.data.cid) {
-            console.log("YouTubeGist: 从__playinfo__获取aid和cid", {
-              aid: playinfo.data.aid,
-              cid: playinfo.data.cid
-            });
-            return {
-              aid: playinfo.data.aid,
-              cid: playinfo.data.cid
-            };
-          }
-        }
-
-        // 方法3: 从URL参数获取（如果有）
-        const urlParams = new URLSearchParams(window.location.search);
-        const aid = urlParams.get('aid');
-        const cid = urlParams.get('cid');
-        if (aid && cid) {
-          console.log("YouTubeGist: 从URL参数获取aid和cid", {
-            aid: parseInt(aid, 10),
-            cid: parseInt(cid, 10)
-          });
-          return {
-            aid: parseInt(aid, 10),
-            cid: parseInt(cid, 10)
-          };
-        }
-
-        // 如果数据还没加载，等待一段时间后重试
-        if (retries < maxRetries - 1) {
-          await new Promise(resolve => setTimeout(resolve, 100));
-          retries++;
-          continue;
-        }
-        
-        break;
-      }
-
-      // 方法4: 从页面脚本标签中提取（备用方案）
-      console.log("YouTubeGist: getAidAndCid - 尝试从脚本标签提取");
-      const scripts = document.querySelectorAll('script');
-      for (const script of scripts) {
-        const text = script.textContent || '';
-        // 尝试匹配 aid 和 cid（更精确的正则）
-        const aidMatch = text.match(/["']aid["']\s*:\s*(\d+)/);
-        const cidMatch = text.match(/["']cid["']\s*:\s*(\d+)/);
-        if (aidMatch && cidMatch) {
-          console.log("YouTubeGist: 从脚本标签获取aid和cid", {
-            aid: parseInt(aidMatch[1], 10),
-            cid: parseInt(cidMatch[1], 10)
-          });
-          return {
-            aid: parseInt(aidMatch[1], 10),
-            cid: parseInt(cidMatch[1], 10)
-          };
-        }
-      }
-
-      // 方法5: 尝试从页面中的data属性获取
-      console.log("YouTubeGist: getAidAndCid - 尝试从data属性获取");
-      const videoElement = document.querySelector('[data-aid], [data-cid]');
-      if (videoElement) {
-        const aidAttr = videoElement.getAttribute('data-aid');
-        const cidAttr = videoElement.getAttribute('data-cid');
-        if (aidAttr && cidAttr) {
-          console.log("YouTubeGist: 从data属性获取aid和cid", {
-            aid: parseInt(aidAttr, 10),
-            cid: parseInt(cidAttr, 10)
-          });
-          return {
-            aid: parseInt(aidAttr, 10),
-            cid: parseInt(cidAttr, 10)
-          };
-        }
-      }
-
-      // 方法6: 尝试从页面URL中提取BV号，然后通过API获取aid和cid
+      // 从页面URL中提取BV号，然后通过API获取aid和cid
       console.log("YouTubeGist: getAidAndCid - 尝试从URL提取BV号");
       const bvMatch = window.location.pathname.match(/\/video\/(BV[a-zA-Z0-9]+)/i);
-      if (bvMatch) {
-        const bvid = bvMatch[1];
-        console.log("YouTubeGist: getAidAndCid - 找到BV号，尝试通过API获取aid和cid", { bvid });
-        
-        try {
-          // 调用B站API获取视频信息（包含aid和cid）
-          const videoInfoUrl = `https://api.bilibili.com/x/web-interface/view?bvid=${bvid}`;
-          console.log("YouTubeGist: getAidAndCid - 调用视频信息API", { videoInfoUrl });
-          
-          const videoInfoResponse = await fetch(videoInfoUrl, {
-            method: 'GET',
-            credentials: 'include',
-            headers: {
-              'Referer': window.location.href,
-              'User-Agent': navigator.userAgent
-            }
-          });
-
-          if (videoInfoResponse.ok) {
-            const videoInfoData = await videoInfoResponse.json();
-            console.log("YouTubeGist: getAidAndCid - 视频信息API响应", {
-              code: videoInfoData.code,
-              hasData: !!videoInfoData.data,
-              hasAid: !!videoInfoData.data?.aid,
-              pagesCount: videoInfoData.data?.pages?.length || 0
-            });
-
-            if (videoInfoData.code === 0 && videoInfoData.data) {
-              const aid = videoInfoData.data.aid;
-              const pages = videoInfoData.data.pages || [];
-              
-              // 获取当前分P的cid
-              const urlParams = new URLSearchParams(window.location.search);
-              const pParam = urlParams.get('p');
-              const currentPage = pParam ? parseInt(pParam, 10) : 1;
-              const pageInfo = pages[currentPage - 1] || pages[0];
-              
-              if (aid && pageInfo && pageInfo.cid) {
-                console.log("YouTubeGist: 通过BV号API获取aid和cid", {
-                  bvid: bvid,
-                  aid: aid,
-                  cid: pageInfo.cid,
-                  page: currentPage
-                });
-                return {
-                  aid: aid,
-                  cid: pageInfo.cid
-                };
-              }
-            }
-          } else {
-            console.warn("YouTubeGist: getAidAndCid - 视频信息API调用失败", {
-              status: videoInfoResponse.status,
-              statusText: videoInfoResponse.statusText
-            });
-          }
-        } catch (error) {
-          console.error("YouTubeGist: getAidAndCid - 通过BV号获取aid和cid失败", error);
-        }
+      if (!bvMatch) {
+        console.warn("YouTubeGist: getAidAndCid - 无法从URL提取BV号");
+        return null;
       }
 
-      console.warn("YouTubeGist: 无法从B站页面获取aid和cid", {
-        retries: retries,
-        hasInitialState: typeof window.__INITIAL_STATE__ !== 'undefined',
-        hasPlayinfo: typeof window.__playinfo__ !== 'undefined'
-      });
-      return null;
+      const bvid = bvMatch[1];
+      console.log("YouTubeGist: getAidAndCid - 找到BV号，尝试通过API获取aid和cid", { bvid });
+      
+      try {
+        // 调用B站API获取视频信息（包含aid和cid）
+        const videoInfoUrl = `https://api.bilibili.com/x/web-interface/view?bvid=${bvid}`;
+        console.log("YouTubeGist: getAidAndCid - 调用视频信息API", { videoInfoUrl });
+        
+        const videoInfoResponse = await fetch(videoInfoUrl, {
+          method: 'GET',
+          credentials: 'include',
+          headers: {
+            'Referer': window.location.href,
+            'User-Agent': navigator.userAgent
+          }
+        });
+
+        if (!videoInfoResponse.ok) {
+          console.warn("YouTubeGist: getAidAndCid - 视频信息API调用失败", {
+            status: videoInfoResponse.status,
+            statusText: videoInfoResponse.statusText
+          });
+          return null;
+        }
+
+        const videoInfoData = await videoInfoResponse.json();
+        console.log("YouTubeGist: getAidAndCid - 视频信息API响应", {
+          code: videoInfoData.code,
+          hasData: !!videoInfoData.data,
+          hasAid: !!videoInfoData.data?.aid,
+          pagesCount: videoInfoData.data?.pages?.length || 0
+        });
+
+        if (videoInfoData.code !== 0 || !videoInfoData.data) {
+          console.warn("YouTubeGist: getAidAndCid - API返回错误或数据为空", {
+            code: videoInfoData.code,
+            message: videoInfoData.message
+          });
+          return null;
+        }
+
+        const aid = videoInfoData.data.aid;
+        const pages = videoInfoData.data.pages || [];
+        
+        // 获取当前分P的cid（优先从URL获取p参数）
+        const currentPage = targetPage !== null ? targetPage : 1;
+        const pageInfo = pages[currentPage - 1] || pages[0];
+        
+        if (!aid || !pageInfo || !pageInfo.cid) {
+          console.warn("YouTubeGist: getAidAndCid - 无法获取aid或cid", {
+            hasAid: !!aid,
+            hasPageInfo: !!pageInfo,
+            hasCid: !!pageInfo?.cid,
+            currentPage: currentPage,
+            pagesCount: pages.length
+          });
+          return null;
+        }
+
+        console.log("YouTubeGist: 通过BV号API获取aid和cid", {
+          bvid: bvid,
+          aid: aid,
+          cid: pageInfo.cid,
+          page: currentPage,
+          targetPage: targetPage
+        });
+        
+        return {
+          aid: aid,
+          cid: pageInfo.cid
+        };
+      } catch (error) {
+        console.error("YouTubeGist: getAidAndCid - 通过BV号获取aid和cid失败", error);
+        return null;
+      }
     } catch (error) {
       console.error("YouTubeGist: 获取aid和cid失败", error);
       return null;

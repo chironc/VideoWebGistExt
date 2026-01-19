@@ -95,10 +95,16 @@ function initPlatformManager() {
   };
 
   const startWhenReady = () => {
+    const delayedBootstrap = () => {
+      setTimeout(() => {
+        bootstrap();
+      }, 2000);
+    };
+    
     if (document.readyState === "loading") {
-      document.addEventListener("DOMContentLoaded", bootstrap, { once: true });
+      document.addEventListener("DOMContentLoaded", delayedBootstrap, { once: true });
     } else {
-      bootstrap();
+      delayedBootstrap();
     }
   };
 
@@ -323,7 +329,7 @@ function attachPanel() {
 
 function findPanelHost() {
   if (!currentAdapter) {
-    return document.body || null;
+    return null;
   }
 
   const selectors = currentAdapter.getPanelHostSelectors();
@@ -335,7 +341,7 @@ function findPanelHost() {
     }
   }
 
-  return document.body || null;
+  return null;
 }
 
 // extractYouTubeVideoId 函数已被适配器的 extractVideoId 方法替代
